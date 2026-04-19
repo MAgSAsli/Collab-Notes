@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Pusher from "pusher-js";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
-import { getSocket, disconnectSocket } from "@/lib/socket";
 
 interface ActiveUser {
   userId: string;
@@ -37,6 +37,11 @@ export default function DocumentPage() {
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isRemoteUpdate = useRef(false);
+  const pusherRef = useRef<Pusher | null>(null);
+
+  const triggerEvent = useCallback(async (event: string, data: object) => {
+    await api.post("/api/pusher", { documentId: id, event, data });
+  }, [id]);
 
   useEffect(() => {
     if (!token) { router.replace("/login"); return; }
@@ -47,25 +52,43 @@ export default function DocumentPage() {
       setContent(data.content);
     }).catch(() => router.replace("/dashboard"));
 
-    const socket = getSocket(token);
-    socket.emit("join-document", { documentId: id, userName: user?.name });
-    socket.on("document-update", ({ content: c }: { content: string }) => {
-      isRemoteUpdate.current = true;
-      setContent(c);
+    // Setup Pusher
+    const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY!, {
+      cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
     });
-    socket.on("title-update", ({ title: t }: { title: string }) => {
-      isRemoteUpdate.current = true;
-      setTitle(t);
+    pusherRef.current = pusher;
+
+    const channel = pusher.subscribe(`document-${id}`);
+
+    channel.bind("content-update", (data: { content: string; senderId: string }) => {
+      if (data.senderId !== user?.id) {
+        isRemoteUpdate.current = true;
+        setContent(data.content);
+      }
     });
-    socket.on("active-users", (users: ActiveUser[]) => setActiveUsers(users));
+
+    channel.bind("title-update", (data: { title: string; senderId: string }) => {
+      if (data.senderId !== user?.id) {
+        isRemoteUpdate.current = true;
+        setTitle(data.title);
+      }
+    });
+
+    channel.bind("user-joined", (data: { users: ActiveUser[] }) => {
+      setActiveUsers(data.users);
+    });
+
+    // Announce presence
+    triggerEvent("user-joined", {
+      users: [{ userId: user?.id, name: user?.name }],
+    });
 
     return () => {
-      socket.off("document-update");
-      socket.off("title-update");
-      socket.off("active-users");
-      disconnectSocket();
+      channel.unbind_all();
+      pusher.unsubscribe(`document-${id}`);
+      pusher.disconnect();
     };
-  }, [id, token, user, router]);
+  }, [id, token, user, router, triggerEvent]);
 
   const autoSave = useCallback((newTitle: string, newContent: string) => {
     setSaved(false);
@@ -80,8 +103,7 @@ export default function DocumentPage() {
     const val = e.target.value;
     setContent(val);
     if (!isRemoteUpdate.current) {
-      const socket = getSocket(token!);
-      socket.emit("document-change", { documentId: id, content: val });
+      triggerEvent("content-update", { content: val });
       autoSave(title, val);
     }
     isRemoteUpdate.current = false;
@@ -91,8 +113,7 @@ export default function DocumentPage() {
     const val = e.target.value;
     setTitle(val);
     if (!isRemoteUpdate.current) {
-      const socket = getSocket(token!);
-      socket.emit("title-change", { documentId: id, title: val });
+      triggerEvent("title-update", { title: val });
       autoSave(val, content);
     }
     isRemoteUpdate.current = false;
@@ -142,21 +163,19 @@ export default function DocumentPage() {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Active users */}
           <div className="flex items-center -space-x-2">
             {activeUsers.slice(0, 4).map((u, i) => (
               <div
                 key={u.userId}
                 title={u.name}
-                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold text-white ring-2"
-                style={{ background: COLORS[i % COLORS.length], ringColor: "#0f0f0f" }}
+                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold text-white ring-2 ring-black"
+                style={{ background: COLORS[i % COLORS.length] }}
               >
-                {u.name.charAt(0).toUpperCase()}
+                {u.name?.charAt(0).toUpperCase()}
               </div>
             ))}
           </div>
 
-          {/* Save status */}
           <div className="flex items-center gap-1.5 text-xs" style={{ color: saved ? "#4ade80" : "#888" }}>
             {saved ? (
               <>
@@ -173,7 +192,6 @@ export default function DocumentPage() {
             )}
           </div>
 
-          {/* Share button */}
           {doc.ownerId === user?.id && (
             <button
               onClick={() => setShowShare(!showShare)}
