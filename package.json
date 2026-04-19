@@ -1,0 +1,9 @@
+{
+  "name": "collab-notes",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev:server": "npm run dev --workspace=apps/server",
+    "dev:web": "npm run dev --workspace=apps/web"
+  }
+}
